@@ -1,6 +1,9 @@
 {
   "dependencies": {
     "axios": "^0.18.0",
-    "verror": "^1.10.0"
+    "chalk": "^2.4.1",
+    "random-date-generator": "^1.0.2",
+    "verror": "^1.10.0",
+    "yyyy-mm-dd": "^1.0.2"
   }
 }
