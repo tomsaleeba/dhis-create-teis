@@ -17,4 +17,5 @@ module.exports = {
     'FvpuJ1Ks9nL', // CTC
   ],
   isTrace: false,
+  parallelTaskCount: 2,
 }

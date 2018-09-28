@@ -1,4 +1,5 @@
 const axios = require('axios')
+const async = require('async')
 const VError = require('verror')
 const chalk = require('chalk')
 const dateGenerator = require('random-date-generator')
@@ -138,6 +139,7 @@ async function generateContext () {
           const resp = await axios.get(apiUrl + `/trackedEntityAttributes/${def.id}/generate`, authConfig)
           return resp.data.value
         } catch (err) {
+          // WARNING: something this dies due to a 500, just run the generator again
           throw new VError(err, `Failed to generate a '${def.displayName}' value`)
         }
       }
@@ -186,13 +188,25 @@ async function createStrategy () {
   try {
     const promises = []
     for (let i = 0; i < config.recordsToCreate; i++) {
-      const p = createSingleRecord(context, i)
-      promises.push(p)
+      promises.push(async function wrapper () {
+        // DHIS generator seems to be time based so we need to go easy on it
+        const waitMs = Math.floor(Math.random() * 50)
+        await new Promise((resolve, reject) => {
+          setTimeout(() => {
+            return resolve()
+          }, waitMs)
+        })
+        return createSingleRecord(context, i)
+      })
     }
-    await Promise.all(promises)
-      //.catch(err => {
-        //console.log(chalk.red('[RUN FAILED]'), `At least one record failed but other may have succeeded`, err)
-      //})
+    await new Promise((resolve, reject) => {
+      async.parallelLimit(promises, config.parallelTaskCount, (err, results) => {
+        if (err) {
+          return reject(err)
+        }
+        return resolve(results)
+      })
+    })
   } catch (err) {
     throw new VError(err, `At least one record failed but other may have succeeded`)
   }
