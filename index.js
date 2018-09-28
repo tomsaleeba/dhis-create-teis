@@ -3,82 +3,61 @@ const VError = require('verror')
 const chalk = require('chalk')
 const dateGenerator = require('random-date-generator')
 const yyyymmdd = require('yyyy-mm-dd')
+const shortid = require('shortid')
 
-const urlBase = process.env.DHIS_URLBASE || 'http://dhis.nacopha.techotom.com'
-const apiUrl = `${urlBase}/api/29`
-const user = process.env.DHIS_USER || 'admin'
-const pass = process.env.DHIS_PASS || 'district'
-const recordsToCreate = process.env.DHIS_RECORD_COUNT || 1
-const fullNamePrefix = 'test-'
-const pageSize = 200
+const defaultConfig = require('./default-config')
+
+let userConfig
+try {
+  userConfig = require('./config.js')
+} catch (err) {
+  console.error(chalk.yellow('[WARN] '), 'No user config (./config.js) found ' +
+    'or error during loading, using all defaults')
+  userConfig = {}
+}
+const config = Object.assign(defaultConfig, userConfig)
+
+const apiUrl = `${config.urlBase}${config.apiPathPrefix}`
 
 let runMode = 'create'
 if ('delete'.startsWith(process.argv[2])) {
   runMode = 'delete'
 }
 
+let recCountFragment = ''
+if (runMode === 'create') {
+  recCountFragment = `recs: ${config.recordsToCreate} records will be created\n`
+}
 console.log(`Using config:
   url : ${apiUrl}
-  user: ${user}
-  pass: ${pass}
+  user: ${config.username}
+  pass: ${config.password}
   mode: ${runMode}
-  recs: ${recordsToCreate} records will be created (if in create mode)
-`)
+  ${recCountFragment}`)
 
 const authConfig = {
-    username: user,
-    password: pass,
+  auth: {
+    username: config.username,
+    password: config.password
   }
-const getConfig = {
-  auth: authConfig
 }
-const deleteConfig = {
-  auth: authConfig
-}
-const postConfig = {
-  headers: {
-    'content-type': 'application/json;charset=UTF-8',
-  },
-  auth: authConfig
+function httpConfig (extra) {
+  if (!extra) {
+    return authConfig
+  }
+  return Object.assign(authConfig, extra)
 }
 
-// trackedEntityAttributes, api/29/trackedEntityAttributes.json
-const nacophaId = 'Ek1Ce9w7ua6'
-const ctc = 'FvpuJ1Ks9nL'
-const fullName = 'Oe2oAS9TfGA'
-const gender = 'jeiN3PX6zqu'
-const age = 'nWEOJSdLtH3'
-const initials = 'hDrhKE59EGO'
-const empowermentGroupRole = 'fWlJ0KzmOZs'
-const empowermentGroupName = 'uqrWr3oPXRB'
-
-// programs, api/29/programs.json
-const programs = {
-  ['Sauti Yetu - [Data Collection]']: 'kBqHaz4Y8Sf',
+let targetOrgUnits = config.targetOrgUnits
+if (targetOrgUnits === true) {
+  // FIXME build orgUnit tree and find all level 5 (empowerment groups) to populate
+  // set targetOrgUnits = [] list of looked up IDs
+  throw new Error(chalk.red('[ERROR] '), 'using all orgUnits is not yet implemented')
 }
-
-// optionSets,  api/29/optionSets.json
-// options, api/29/options.json
-const genders = {
-  male: '1',
-  female: '2'
-}
-const orgUnits = {
-  'Arusha CC Konga': 'Ya1xQwpjOBl',
-}
-const empowermentGroupRoles = {
-  group1: '4',
-}
-const empowermentGroupNames = {
-  member: '1',
-}
-
-// trackedEntityTypes, api/29/trackedEntityTypes.json
-const person = 'kJQnjvFXP18'
 
 const strategies = {
   create: createStrategy,
-  delete: deleteStrategy,
+  delete: deleteStrategy
 }
 
 const strategy = strategies[runMode]
@@ -91,140 +70,244 @@ strategy().catch(err => {
 })
 
 
-async function createStrategy () {
-  for (let i = 0; i < recordsToCreate; i++) {
-    try {
-      info(`Creating record ${i+1}/${recordsToCreate}`)
-      await createSingleRecord()
-    } catch (err) {
-      throw new VError(err, 'Failed to execute creating a single record')
+
+function getOrgUnit () {
+  const index = Math.floor(Math.random() * targetOrgUnits.length)
+  return targetOrgUnits[index]
+}
+
+async function getTrackedEntityAttributes () {
+  let attributeIdsInProgram
+  try {
+    const resp = await axios.get(apiUrl + `/programs/${config.targetProgram}`, httpConfig({
+      params: {
+        paging: false,
+        fields: `programTrackedEntityAttributes[trackedEntityAttribute]`
+      }
+    }))
+    attributeIdsInProgram = resp.data.programTrackedEntityAttributes.map(e => e.trackedEntityAttribute.id)
+  } catch (err) {
+    throw chainedError(err, `Failed to get list of tracked entity attributes in the program='${config.targetProgram}'`)
+  }
+  try {
+    const idFilter = attributeIdsInProgram.join(',')
+    const resp = await axios.get(apiUrl + '/trackedEntityAttributes', httpConfig({
+      params: {
+        paging: false,
+        filter: `id:in:[${idFilter}]`,
+        fields: `
+          id,
+          displayName,
+          valueType,
+          generated,
+          optionSet[
+            id,
+            options[
+              code,
+              displayName
+            ]
+          ]`.replace(/\s/g, '')
+      }
+    }))
+    const result = resp.data.trackedEntityAttributes.reduce((accum, curr) => {
+      const key = curr.id
+      const def = {
+        id: curr.id,
+        type: curr.valueType,
+        displayName: curr.displayName,
+        generated: curr.generated
+      }
+      if (curr.optionSet && curr.optionSet.options) {
+        def.values = curr.optionSet.options.map(e => e.code)
+      }
+      accum[key] = def
+      return accum
+    }, {})
+    return result
+  } catch (err) {
+    throw chainedError(err, 'Failed to get tracked entity attributes')
+  }
+}
+
+async function generateContext () {
+  const teas = await getTrackedEntityAttributes()
+  const teaStrategies = {
+    TEXT: async def => {
+      if (def.generated) {
+        try {
+          const resp = await axios.get(apiUrl + `/trackedEntityAttributes/${def.id}/generate`, authConfig)
+          return resp.data.value
+        } catch (err) {
+          throw new VError(err, `Failed to generate a '${def.displayName}' value`)
+        }
+      }
+      if (def.id === config.fullNameAttributeId) {
+        return config.fullNamePrefix + generateName()
+      }
+      if (def.id === config.initialsAttributeId) {
+        return 'AA' // too hard to synchronise with fullName
+      }
+      if (def.values) {
+        const index = Math.floor(Math.random() * def.values.length)
+        return def.values[index]
+      }
+      const mustBeUnique = config.uniqueTextAttributes.find(e => e === def.id)
+      if (mustBeUnique) {
+        return shortid.generate()
+      }
+      return 'default value'
+    },
+    ORGANISATION_UNIT: def => {
+      return def.orgUnit // asuming we need to be consistent and use the same orgUnit throughout for a single TEI
+    },
+    BOOLEAN: def => {
+      return Math.random() > 0.5
+    },
+    PHONE_NUMBER: def => {
+      return '1234567890'
+    },
+    AGE: def => { // it's actually date of birth, not age
+      return generateRandomDate()
+    },
+    DATE: def => {
+      return generateRandomDate()
+    }
+  }
+  return {
+    trackedEntityAttributes: {
+      vocab: teas,
+      strategies: teaStrategies
     }
   }
 }
 
-async function createSingleRecord () {
-  const uniqueFragment = new Date().getTime()
-
-  // getNacophaId
-  let nextNacophaIdValue
+async function createStrategy () {
+  const context = await generateContext()
   try {
-    const resp = await axios.get(apiUrl + `/trackedEntityAttributes/${nacophaId}/generate`, getConfig)
-    nextNacophaIdValue = resp.data.value
+    const promises = []
+    for (let i = 0; i < config.recordsToCreate; i++) {
+      const p = createSingleRecord(context, i)
+      promises.push(p)
+    }
+    await Promise.all(promises)
+      //.catch(err => {
+        //console.log(chalk.red('[RUN FAILED]'), `At least one record failed but other may have succeeded`, err)
+      //})
   } catch (err) {
-    throw new VError(err, 'Failed to generate a NACOPHA ID')
+    throw new VError(err, `At least one record failed but other may have succeeded`)
   }
-  const nameAndInitials = generateNameAndInitials()
-  const fullNameValue = fullNamePrefix + nameAndInitials.name
-  const randomGender = Math.random() > 0.5 ? genders.male : genders.female
-  const randomDateStr = generateRandomDate()
-  // create trackedEntityInstance
+}
+
+async function buildTeiAttributes (context, orgUnit) {
+  const teaIds = Object.keys(context.trackedEntityAttributes.vocab)
+  const result = []
+  for (let currKey of teaIds) {
+    const curr = context.trackedEntityAttributes.vocab[currKey]
+    const currType = curr.type
+    const strategy = context.trackedEntityAttributes.strategies[currType]
+    if (!strategy) {
+      throw new Error(`Failed while trying to create an attribute of type='${currType}'; cannot find suitable strategy`)
+    }
+    curr.orgUnit = orgUnit
+    const value = await strategy(curr)
+    result.push({
+      attribute: currKey,
+      value: value
+    })
+  }
+  return result
+}
+
+async function createSingleRecord (context, index) {
+  info(`Creating record ${index + 1}/${config.recordsToCreate}`)
+  const orgUnit = getOrgUnit()
+  let teiAttributes
+  try {
+    teiAttributes = await buildTeiAttributes(context, orgUnit)
+  } catch (err) {
+    throw new VError(err, 'Failed while trying to build tracked entity attributes')
+  }
   const createTeiData = {
-    trackedEntityType: person,
-    orgUnit: orgUnits['Arusha CC Konga'],
-    attributes: [
-      {
-        attribute: nacophaId,
-        value: nextNacophaIdValue
-      }, {
-        attribute: ctc,
-        value: `${uniqueFragment}`
-      }, {
-        attribute: fullName,
-        value: fullNameValue
-      }, {
-        attribute: gender,
-        value: randomGender
-      }, {
-        attribute: age,
-        value: randomDateStr
-      }, {
-        attribute: initials,
-        value: nameAndInitials.initials
-      }, {
-        attribute: empowermentGroupRole,
-        value: empowermentGroupRoles.group1
-      }, {
-        attribute: empowermentGroupName,
-        value: empowermentGroupNames.member
-      }
-    ]
+    trackedEntityType: config.personTrackedEntityType,
+    orgUnit: orgUnit,
+    attributes: teiAttributes
   }
-  info(`Creating a TEI with name='${fullNameValue}', DOB='${randomDateStr}', gender='${randomGender}', nacophaId='${nextNacophaIdValue}'`)
+  if (config.isTrace) {
+    dumpTeiToConsole(createTeiData, context)
+  }
+  info(`Creating a TEI`)
   let teiId
   try {
-    const resp = await axios.post(apiUrl + '/trackedEntityInstances', createTeiData, postConfig)
+    const resp = await axios.post(apiUrl + '/trackedEntityInstances', createTeiData, authConfig)
     teiId = resp.data.response.importSummaries[0].reference
   } catch (err) {
-    //const errData = err && err.response && err.response.data || false
-    //if (errData) {
-    //console.error('====================')
-    //console.error(errData.message)
-    //console.error(errData.response.importSummaries[0].conflicts)
-    //console.error('====================')
-    //}
-    throw new VError(err, 'Failed to create trackedEntityInstance')
+    logAxiosError(err)
+    throw new VError(err, `Failed to create a trackedEntityInstance`)
   }
   // enroll trackedEntityInstance
+  const someDate = generateRandomDate()
   const enrollTeiData = {
-    enrollmentDate: '2018-09-09',
-    incidentDate: '2018-09-10',
-    orgUnit: orgUnits['Arusha CC Konga'],
-    program: programs['Sauti Yetu - [Data Collection]'],
+    enrollmentDate: someDate,
+    incidentDate: someDate,
+    orgUnit: orgUnit,
+    program: config.targetProgram,
     status: 'ACTIVE',
     trackedEntityInstance: teiId
   }
-  info(`Enrolling ${fullNameValue}`)
+  info(`Enrolling TEI ${teiId}`)
   try {
-    await axios.post(apiUrl + '/enrollments', enrollTeiData, postConfig)
+    await axios.post(apiUrl + '/enrollments', enrollTeiData, authConfig)
   } catch (err) {
     throw new VError(err, `Failed to enroll TEI with ID='${teiId}'`)
   }
-  info(`Created and enrolled ${fullNameValue}`)
+  info(`Created and enrolled ${teiId}`)
   return true
+}
+
+function logAxiosError (err) {
+  const errData = err && err.response && err.response.data || false
+  if (!errData) {
+    return
+  }
+  console.error('====================')
+  console.error(errData.message)
+  console.error(errData.response.importSummaries[0].conflicts)
+  console.error('====================')
 }
 
 async function deleteStrategy () {
   info('Gathering TEI IDs to delete')
-  const url = apiUrl + `/trackedEntityInstances?ouMode=ALL&filter=${fullName}:LIKE:${fullNamePrefix}&pageSize=${pageSize}`
-  axios.get(url, getConfig)
-    .then(resp => {
-      const teisToDelete = resp.data.trackedEntityInstances.reduce((accum, curr) => {
-        accum.push(curr.trackedEntityInstance)
-        return accum
-      }, [])
-      const foundCount = teisToDelete.length
-      if (foundCount === 0) {
-        info('No TEIs found for deletion, exiting.')
-        return false
+  let teisToDelete
+  try {
+    const orgUnitIdList = targetOrgUnits.join(';')
+    const resp = await axios.get(apiUrl + `/trackedEntityInstances`, httpConfig({
+      params: {
+        filter: `${config.fullNameAttributeId}:LIKE:${config.fullNamePrefix}`,
+        ou: orgUnitIdList,
+        pageSize: config.pageSize
       }
-      info(`Found ${foundCount} TEIs to delete`)
-      if (foundCount >= pageSize) {
-        info('Found a full page of TEIs to delete, you should run this again in case there are more records than our page size')
-      }
-      return teisToDelete
-    })
-    .catch(err => {
-      console.error(new VError(err, 'Failed to get list of TEIs to delete'))
-      return false
-    })
-    .then(teisToDelete => {
-      if (!teisToDelete) {
-        return false
-      }
-      const deletePromises = teisToDelete.map(curr => axios.delete(apiUrl + `/trackedEntityInstances/${curr}`, deleteConfig))
-      info('Starting delete operations')
-      return Promise.all(deletePromises)
-    })
-    .then(results => {
-      if (!results) {
-        return false
-      }
-      info(`Successfully deleted ${results.length} TEIs`)
-    })
-    .catch(err => {
-      console.error(new VError(err, 'Failed to delete all TEIs, some may have succeeded though'))
-      return false
-    })
+    }))
+    teisToDelete = resp.data.trackedEntityInstances.map(e => e.trackedEntityInstance)
+    const foundCount = teisToDelete.length
+    if (foundCount === 0) {
+      info('No TEIs found for deletion, exiting.')
+      return
+    }
+    info(`Found ${foundCount} TEIs to delete`)
+    if (foundCount >= config.pageSize) {
+      info('Found a full page of TEIs to delete, you should run this again in case there are more records than our page size')
+    }
+  } catch (err) {
+    throw new VError(err, 'Failed to get list of TEIs to delete')
+  }
+  const deletePromises = teisToDelete.map(curr => axios.delete(apiUrl + `/trackedEntityInstances/${curr}`, authConfig))
+  info('Starting delete operations')
+  try {
+    await Promise.all(deletePromises)
+    info(`Successfully deleted ${deletePromises.length} TEIs`)
+  } catch (err) {
+    throw new VError(err, 'Failed to delete all TEIs, some may have succeeded though')
+  }
 }
 
 function info (msg) {
@@ -282,7 +365,7 @@ const firstNames = [
   'Rosaria',
   'Daniela',
   'Sharla',
-  'Mervin',
+  'Mervin'
 ]
 
 const surnames = [
@@ -335,25 +418,41 @@ const surnames = [
   'Rodman',
   'Aranda',
   'Brodie',
-  'Recinos',
+  'Recinos'
 ]
 
-function generateNameAndInitials () {
+function generateName () {
   const firstNameIndex = Math.floor(Math.random() * firstNames.length)
   const surnameIndex = Math.floor(Math.random() * surnames.length)
   const firstNameValue = firstNames[firstNameIndex]
   const surnameValue = surnames[surnameIndex]
-  return {
-    name: `${firstNameValue} ${surnameValue}`,
-    initials: `${firstNameValue.substr(0,1)}${surnameValue.substr(0,1)}`
-  }
+  return `${firstNameValue} ${surnameValue}`
 }
 
 function generateRandomDate () {
   const startDate = new Date(1950, 1, 1)
   const endDate = new Date(2017, 5, 5)
   const r = dateGenerator.getRandomDateInRange(startDate, endDate)
-  //return `${r.getFullYear()}-${r.getMonth()}-${r.getDay()}`
   return yyyymmdd(r)
 }
 
+function chainedError (err, msg) {
+  err.message = `${msg}\nCaused by: ${err.message}`
+  return err
+}
+
+function dumpTeiToConsole (createTeiData, context) {
+  function l (msg) {
+    console.log(`  ${msg}`)
+  }
+  console.log(chalk.green('## TEI dump:'))
+  l(`type: ${createTeiData.trackedEntityType}`)
+  l(`orgUnit: ${createTeiData.orgUnit}`)
+  l(`attributes:`)
+  for (let curr of createTeiData.attributes) {
+    const attrDef = context.trackedEntityAttributes.vocab[curr.attribute]
+    const name = attrDef.displayName
+    const type = attrDef.type
+    l(`  ${curr.attribute} ${name} (${type}) = ${curr.value}`)
+  }
+}
