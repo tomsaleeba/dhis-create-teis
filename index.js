@@ -472,6 +472,7 @@ function padToTwo(number) {
 }
 
 function generateCTC () {
+  // not guaranteed to be unique but you're unlucky if it's not. Just run the program again
   const region = padToTwo(Math.floor(Math.random() * 10))
   const district = padToTwo(Math.floor(Math.random() * 10))
   const ctcId = padToFour(Math.floor(Math.random() * 1000))
