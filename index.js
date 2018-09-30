@@ -89,6 +89,7 @@ async function getTrackedEntityAttributes () {
     attributeIdsInProgram = resp.data.programTrackedEntityAttributes.map(e => e.trackedEntityAttribute.id)
   } catch (err) {
     throw chainedError(err, `Failed to get list of tracked entity attributes in the program='${config.targetProgram}'`)
+	logAxiosError(err)
   }
   try {
     const idFilter = attributeIdsInProgram.join(',')
@@ -126,6 +127,7 @@ async function getTrackedEntityAttributes () {
     }, {})
     return result
   } catch (err) {
+  	logAxiosError(err)
     throw chainedError(err, 'Failed to get tracked entity attributes')
   }
 }
@@ -155,7 +157,7 @@ async function generateContext () {
       }
       const mustBeUnique = config.uniqueTextAttributes.find(e => e === def.id)
       if (mustBeUnique) {
-        return shortid.generate()
+        return generateCTC() // FIXME - right now we assume the first element in config is CTC - that might change.
       }
       return 'default value'
     },
@@ -434,6 +436,24 @@ const surnames = [
   'Brodie',
   'Recinos'
 ]
+
+function padToFour(number) {
+  if (number<=9999) { number = ("000"+number).slice(-4); }
+  return number;
+}
+
+function padToTwo(number) {
+  if (number<=99) { number = ("0"+number).slice(-2); }
+  return number;
+}
+
+function generateCTC () {
+  const region = padToTwo(Math.floor(Math.random() * 10))
+  const district = padToTwo(Math.floor(Math.random() * 10))
+  const ctcId = padToFour(Math.floor(Math.random() * 1000))
+  const clientId = padToFour(Math.floor(Math.random() * 1000))
+  return `${region}-${district}-${ctcId}-${clientId}`
+}
 
 function generateName () {
   const firstNameIndex = Math.floor(Math.random() * firstNames.length)
