@@ -36,43 +36,65 @@ console.log(`Using config:
   mode: ${runMode}
   ${recCountFragment}`)
 
-const authConfig = {
-  auth: {
-    username: config.username,
-    password: config.password
-  }
-}
 function httpConfig (extra) {
+  const authConfig = {
+    auth: {
+      username: config.username,
+      password: config.password
+    }
+  }
   if (!extra) {
     return authConfig
   }
-  return Object.assign(authConfig, extra)
+  return Object.assign(httpConfig(), extra)
 }
 
-let targetOrgUnits = config.targetOrgUnits
-if (targetOrgUnits === true) {
-  // FIXME build orgUnit tree and find all level 5 (empowerment groups) to populate
-  // set targetOrgUnits = [] list of looked up IDs
-  throw new Error(chalk.red('[ERROR] '), 'using all orgUnits is not yet implemented')
+async function main () {
+  const strategies = {
+    create: createStrategy,
+    delete: deleteStrategy
+  }
+  const strategy = strategies[runMode]
+  if (!strategy) {
+    console.error(`Unsupported runMode = '${runMode}', exiting.`)
+  }
+  let targetOrgUnits = config.targetOrgUnits
+  if (targetOrgUnits === true) {
+    console.log(chalk.blue('[INFO]'), 'looking up orgUnits from server')
+    targetOrgUnits = await populateTargetOrgUnits()
+    console.log(chalk.blue('[INFO]'), `found ${targetOrgUnits.length} orgUnits`)
+  }
+  try {
+    await strategy(targetOrgUnits)
+  } catch (err) {
+    throw chainedError(err, `Failed to execute '${runMode}' strategy`)
+  }
 }
-
-const strategies = {
-  create: createStrategy,
-  delete: deleteStrategy
-}
-
-const strategy = strategies[runMode]
-if (!strategy) {
-  console.error(`Unsupported runMode = '${runMode}', exiting.`)
-  process.exit(1)
-}
-strategy().catch(err => {
+main().catch(err => {
   console.error(chalk.red('[ERROR] '), new VError(err))
+  process.exit(1)
 })
 
 
 
-function getOrgUnit () {
+async function populateTargetOrgUnits () {
+  try {
+    const resp = await axios.get(apiUrl + '/organisationUnits', httpConfig({
+      params: {
+        filter: 'level:eq:5',
+      },
+      paging: false,
+    }))
+    if (!resp.data.organisationUnits || resp.data.organisationUnits.length === 0) {
+      throw new Error(`request to get orgUnits from server succeeded but there are no items in the response, data=${JSON.stringify(resp.data)}`)
+    }
+    return resp.data.organisationUnits.map(e => e.id)
+  } catch (err) {
+    throw chainedError(err, 'failed while trying to get all level 5 orgUnits (empowerment groups)')
+  }
+}
+
+function getOrgUnit (targetOrgUnits) {
   const index = Math.floor(Math.random() * targetOrgUnits.length)
   return targetOrgUnits[index]
 }
@@ -88,8 +110,8 @@ async function getTrackedEntityAttributes () {
     }))
     attributeIdsInProgram = resp.data.programTrackedEntityAttributes.map(e => e.trackedEntityAttribute.id)
   } catch (err) {
+    logAxiosError(err)
     throw chainedError(err, `Failed to get list of tracked entity attributes in the program='${config.targetProgram}'`)
-	logAxiosError(err)
   }
   try {
     const idFilter = attributeIdsInProgram.join(',')
@@ -138,11 +160,10 @@ async function generateContext () {
     TEXT: async def => {
       if (def.generated) {
         try {
-          const resp = await axios.get(apiUrl + `/trackedEntityAttributes/${def.id}/generate`, authConfig)
+          const resp = await axios.get(apiUrl + `/trackedEntityAttributes/${def.id}/generate`, httpConfig())
           return resp.data.value
         } catch (err) {
-          // WARNING: something this dies due to a 500, just run the generator again
-          throw new VError(err, `Failed to generate a '${def.displayName}' value`)
+          throw new VError(err, `Failed to generate a '${def.displayName}' value. This happens sometimes, just try again.`)
         }
       }
       if (def.id === config.fullNameAttributeId) {
@@ -157,7 +178,10 @@ async function generateContext () {
       }
       const mustBeUnique = config.uniqueTextAttributes.find(e => e === def.id)
       if (mustBeUnique) {
-        return generateCTC() // FIXME - right now we assume the first element in config is CTC - that might change.
+        if (def.id === config.ctcAttributeId) {
+          return generateCTC()
+        }
+        return shortid.generate()
       }
       return 'default value'
     },
@@ -185,7 +209,7 @@ async function generateContext () {
   }
 }
 
-async function createStrategy () {
+async function createStrategy (targetOrgUnits) {
   const context = await generateContext()
   try {
     const promises = []
@@ -198,7 +222,7 @@ async function createStrategy () {
             return resolve()
           }, waitMs)
         })
-        return createSingleRecord(context, i)
+        return createSingleRecord(context, i, targetOrgUnits)
       })
     }
     await new Promise((resolve, reject) => {
@@ -210,7 +234,7 @@ async function createStrategy () {
       })
     })
   } catch (err) {
-    throw new VError(err, `At least one record failed but other may have succeeded`)
+    throw new VError(err, `At least one record failed but others may have succeeded`)
   }
 }
 
@@ -234,9 +258,9 @@ async function buildTeiAttributes (context, orgUnit) {
   return result
 }
 
-async function createSingleRecord (context, index) {
+async function createSingleRecord (context, index, targetOrgUnits) {
   info(`Creating record ${index + 1}/${config.recordsToCreate}`)
-  const orgUnit = getOrgUnit()
+  const orgUnit = getOrgUnit(targetOrgUnits)
   let teiAttributes
   try {
     teiAttributes = await buildTeiAttributes(context, orgUnit)
@@ -254,7 +278,7 @@ async function createSingleRecord (context, index) {
   info(`Creating a TEI`)
   let teiId
   try {
-    const resp = await axios.post(apiUrl + '/trackedEntityInstances', createTeiData, authConfig)
+    const resp = await axios.post(apiUrl + '/trackedEntityInstances', createTeiData, httpConfig())
     teiId = resp.data.response.importSummaries[0].reference
   } catch (err) {
     logAxiosError(err)
@@ -272,11 +296,11 @@ async function createSingleRecord (context, index) {
   }
   info(`Enrolling TEI ${teiId}`)
   try {
-    await axios.post(apiUrl + '/enrollments', enrollTeiData, authConfig)
+    await axios.post(apiUrl + '/enrollments', enrollTeiData, httpConfig())
   } catch (err) {
     throw new VError(err, `Failed to enroll TEI with ID='${teiId}'`)
   }
-  info(`Created and enrolled ${teiId}`)
+  info(`Created and enrolled ${teiId} in orgUnit ${orgUnit}`)
   return true
 }
 
@@ -291,7 +315,7 @@ function logAxiosError (err) {
   console.error('====================')
 }
 
-async function deleteStrategy () {
+async function deleteStrategy (targetOrgUnits) {
   info('Gathering TEI IDs to delete')
   let teisToDelete
   try {
@@ -316,7 +340,7 @@ async function deleteStrategy () {
   } catch (err) {
     throw new VError(err, 'Failed to get list of TEIs to delete')
   }
-  const deletePromises = teisToDelete.map(curr => axios.delete(apiUrl + `/trackedEntityInstances/${curr}`, authConfig))
+  const deletePromises = teisToDelete.map(curr => axios.delete(apiUrl + `/trackedEntityInstances/${curr}`, httpConfig()))
   info('Starting delete operations')
   try {
     await Promise.all(deletePromises)
