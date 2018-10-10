@@ -1,3 +1,5 @@
+const ctcAttributeId = 'FvpuJ1Ks9nL'
+
 module.exports = {
   recordsToCreate: 1,
   username: 'admin', // DHIS login username
@@ -12,10 +14,11 @@ module.exports = {
   // get these IDs from /api/trackedEntityAttributes.json
   fullNameAttributeId: 'Oe2oAS9TfGA',
   initialsAttributeId: 'hDrhKE59EGO',
+  ctcAttributeId: ctcAttributeId,
   // this ID comes from /api/trackedEntityTypes.json
   personTrackedEntityType: 'kJQnjvFXP18',
   uniqueTextAttributes: [
-    'FvpuJ1Ks9nL' // CTC
+    ctcAttributeId,
   ],
   isTrace: false, // true for verbose logging
   parallelTaskCount: 2, // rate limiting so we don't DOS the DHIS instance
