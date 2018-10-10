@@ -261,10 +261,9 @@ async function createSingleRecord (context, index) {
     throw new VError(err, `Failed to create a trackedEntityInstance`)
   }
   // enroll trackedEntityInstance
-  const someDate = generateRandomDate()
   const enrollTeiData = {
-    enrollmentDate: someDate,
-    incidentDate: someDate,
+    enrollmentDate: today(),
+    incidentDate: today(),
     orgUnit: orgUnit,
     program: config.targetProgram,
     status: 'ACTIVE',
@@ -461,6 +460,10 @@ function generateName () {
   const firstNameValue = firstNames[firstNameIndex]
   const surnameValue = surnames[surnameIndex]
   return `${firstNameValue} ${surnameValue}`
+}
+
+function today () {
+  return yyyymmdd(new Date())
 }
 
 function generateRandomDate () {
