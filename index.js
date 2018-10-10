@@ -5,6 +5,7 @@ const chalk = require('chalk')
 const dateGenerator = require('random-date-generator')
 const yyyymmdd = require('yyyy-mm-dd')
 const shortid = require('shortid')
+const moment = require('moment')
 
 const defaultConfig = require('./default-config')
 
@@ -25,23 +26,28 @@ if ('delete'.startsWith(process.argv[2])) {
   runMode = 'delete'
 }
 
-let recCountFragment = ''
+let logFragmentForCreate = ''
 if (runMode === 'create') {
-  recCountFragment = `recs: ${config.recordsToCreate} records will be created\n`
+  logFragmentForCreate = `
+  recs: ${config.recordsToCreate} records will be created
+  months back: ${config.startDataEntryMonthsBack}
+  for months: ${config.dataEntryMonthCount}`
 }
 console.log(`Using config:
   url : ${apiUrl}
   user: ${config.username}
   pass: ${config.password}
-  mode: ${runMode}
-  ${recCountFragment}`)
+  mode: ${runMode}${logFragmentForCreate}
+  `)
 
+const cache = {}
 const authConfig = {
   auth: {
     username: config.username,
     password: config.password
   }
 }
+
 function httpConfig (extra) {
   if (!extra) {
     return authConfig
@@ -70,8 +76,6 @@ strategy().catch(err => {
   console.error(chalk.red('[ERROR] '), new VError(err))
 })
 
-
-
 function getOrgUnit () {
   const index = Math.floor(Math.random() * targetOrgUnits.length)
   return targetOrgUnits[index]
@@ -80,7 +84,7 @@ function getOrgUnit () {
 async function getTrackedEntityAttributes () {
   let attributeIdsInProgram
   try {
-    const resp = await axios.get(apiUrl + `/programs/${config.targetProgram}`, httpConfig({
+    const resp = await axios.get(`${apiUrl}/programs/${config.targetProgram}`, httpConfig({
       params: {
         paging: false,
         fields: `programTrackedEntityAttributes[trackedEntityAttribute]`
@@ -89,11 +93,10 @@ async function getTrackedEntityAttributes () {
     attributeIdsInProgram = resp.data.programTrackedEntityAttributes.map(e => e.trackedEntityAttribute.id)
   } catch (err) {
     throw chainedError(err, `Failed to get list of tracked entity attributes in the program='${config.targetProgram}'`)
-	logAxiosError(err)
   }
   try {
     const idFilter = attributeIdsInProgram.join(',')
-    const resp = await axios.get(apiUrl + '/trackedEntityAttributes', httpConfig({
+    const resp = await axios.get(`${apiUrl}/trackedEntityAttributes`, httpConfig({
       params: {
         paging: false,
         filter: `id:in:[${idFilter}]`,
@@ -127,7 +130,7 @@ async function getTrackedEntityAttributes () {
     }, {})
     return result
   } catch (err) {
-  	logAxiosError(err)
+    logAxiosError(err)
     throw chainedError(err, 'Failed to get tracked entity attributes')
   }
 }
@@ -138,7 +141,7 @@ async function generateContext () {
     TEXT: async def => {
       if (def.generated) {
         try {
-          const resp = await axios.get(apiUrl + `/trackedEntityAttributes/${def.id}/generate`, authConfig)
+          const resp = await axios.get(`${apiUrl}/trackedEntityAttributes/${def.id}/generate`, authConfig)
           return resp.data.value
         } catch (err) {
           // WARNING: something this dies due to a 500, just run the generator again
@@ -270,17 +273,125 @@ async function createSingleRecord (context, index) {
     trackedEntityInstance: teiId
   }
   info(`Enrolling TEI ${teiId}`)
+  let enrollmentId
   try {
-    await axios.post(apiUrl + '/enrollments', enrollTeiData, authConfig)
+    const resp = await axios.post(`${apiUrl}/enrollments`, enrollTeiData, authConfig)
+    enrollmentId = resp.data.response.importSummaries[0].reference
   } catch (err) {
     throw new VError(err, `Failed to enroll TEI with ID='${teiId}'`)
   }
-  info(`Created and enrolled ${teiId}`)
+  info(`Created and enrolled ${teiId}, now generating events`)
+  try {
+    await generateEventData(teiId, orgUnit, enrollmentId)
+  } catch (err) {
+    throw new VError(err, 'Failed to generate event data')
+  }
   return true
 }
 
+async function generateEventData (teiId, orgUnit, enrollmentId) {
+  const eventDate = moment().subtract(config.startDataEntryMonthsBack, 'months')
+  const events = []
+  for (let i = 0; i < config.dataEntryMonthCount; i++) {
+    const dataValues = await generateSetOfDataElements()
+    eventDate.add(1, 'months') // note: moment mutates in place
+    const event = {
+      trackedEntityInstance: teiId,
+      program: config.targetProgram,
+      programStage: config.targetProgramStage,
+      orgUnit,
+      enrollment: enrollmentId,
+      status: 'COMPLETED',
+      dataValues,
+      eventDate: eventDate.toISOString()
+    }
+    events.push(event)
+  }
+  try {
+    info(`POSTing ${events.length} events for TEI='${teiId}'`)
+    if (config.isTrace) {
+      dumpEventsToConsole(events, teiId)
+    }
+    await axios.post(`${apiUrl}/events`, { events }, authConfig)
+  } catch (err) {
+    throw new VError(err, `Failed to post events for tei='${teiId}'`)
+  }
+}
+
+async function getDataElementDefs () {
+  const cacheKey = 'dataElementDefs'
+  let result = cache[cacheKey]
+  if (result) {
+    return result
+  }
+  try {
+    const resp = await axios.get(`${apiUrl}/programStages/${config.targetProgramStage}`, httpConfig({
+      params: {
+        paging: false,
+        fields: `
+          programStageSections[
+            dataElements[
+              id,
+              formName,
+              displayName,
+              valueType,
+              optionSetValue,
+              optionSet[
+                id,
+                options[
+                  id,
+                  displayName
+                ]
+              ]
+            ]
+          ]`.replace(/\s/g, '')
+      }
+    }))
+    result = resp.data.programStageSections.reduce((accum, curr) => {
+      return accum.concat(curr.dataElements)
+    }, [])
+  } catch (err) {
+    throw new VError(err, 'Failed to get list of data element definitions from server')
+  }
+  cache[cacheKey] = result
+  return result
+}
+
+async function generateSetOfDataElements () {
+  const colTypeStrategies = {
+    BOOLEAN_novocab: function (def) {
+      return Math.random() > 0.5
+    },
+    TEXT_vocab: function (def) {
+      const options = def.optionSet.options.map(e => e.code)
+      const index = Math.floor(Math.random() * options.length)
+      return options[index]
+    },
+    TEXT_novocab: function (def) {
+      return 'free text ' + shortid.generate()
+    },
+    DATE_novocab: rawValue => {
+      return generateRandomDate()
+    }
+  }
+  const dataElementDefs = await getDataElementDefs()
+  return dataElementDefs.map(def => {
+    const vocabType = def.optionSetValue ? 'vocab' : 'novocab'
+    const key = `${def.valueType}_${vocabType}`
+    const strategy = colTypeStrategies[key]
+    if (!strategy) {
+      throw new Error(`Could not find a data element generator strategy for type='${key}'`)
+    }
+    const value = strategy(def)
+    return {
+      dataElement: def.id,
+      value
+    }
+  })
+}
+
 function logAxiosError (err) {
-  const errData = err && err.response && err.response.data || false
+  const errData = err && err.response && err.response.data
   if (!errData) {
     return
   }
@@ -295,7 +406,7 @@ async function deleteStrategy () {
   let teisToDelete
   try {
     const orgUnitIdList = targetOrgUnits.join(';')
-    const resp = await axios.get(apiUrl + `/trackedEntityInstances`, httpConfig({
+    const resp = await axios.get(`${apiUrl}/trackedEntityInstances`, httpConfig({
       params: {
         filter: `${config.fullNameAttributeId}:LIKE:${config.fullNamePrefix}`,
         ou: orgUnitIdList,
@@ -315,7 +426,7 @@ async function deleteStrategy () {
   } catch (err) {
     throw new VError(err, 'Failed to get list of TEIs to delete')
   }
-  const deletePromises = teisToDelete.map(curr => axios.delete(apiUrl + `/trackedEntityInstances/${curr}`, authConfig))
+  const deletePromises = teisToDelete.map(curr => axios.delete(`${apiUrl}/trackedEntityInstances/${curr}`, authConfig))
   info('Starting delete operations')
   try {
     await Promise.all(deletePromises)
@@ -436,14 +547,14 @@ const surnames = [
   'Recinos'
 ]
 
-function padToFour(number) {
-  if (number<=9999) { number = ("000"+number).slice(-4); }
-  return number;
+function padToFour (number) {
+  if (number <= 9999) { number = ('000' + number).slice(-4) }
+  return number
 }
 
-function padToTwo(number) {
-  if (number<=99) { number = ("0"+number).slice(-2); }
-  return number;
+function padToTwo (number) {
+  if (number <= 99) { number = ('0' + number).slice(-2) }
+  return number
 }
 
 function generateCTC () {
@@ -491,5 +602,24 @@ function dumpTeiToConsole (createTeiData, context) {
     const name = attrDef.displayName
     const type = attrDef.type
     l(`  ${curr.attribute} ${name} (${type}) = ${curr.value}`)
+  }
+}
+
+function dumpEventsToConsole (events, teiId) {
+  function l (msg) {
+    console.log(`  ${msg}`)
+  }
+  console.log(chalk.green(`## Events dump for TEI ${teiId} (count=${events.length}):`))
+  let eventNum = 1
+  events.sort((a, b) => {
+    if (a.eventDate < b.eventDate) { return -1 }
+    if (a.eventDate > b.eventDate) { return 1 }
+    return 0
+  })
+  for (let curr of events) {
+    l(`event ${eventNum++}`)
+    l(`  eventDate: ${curr.eventDate}`)
+    const values = curr.dataValues.map(e => e.value).join(',')
+    l(`  values: ${values}`)
   }
 }
