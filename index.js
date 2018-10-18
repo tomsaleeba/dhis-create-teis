@@ -196,6 +196,9 @@ async function generateContext () {
     BOOLEAN: def => {
       return Math.random() > 0.5
     },
+    NUMBER: def => {
+      return Math.random() * 100
+    },
     PHONE_NUMBER: def => {
       return '1234567890'
     },
@@ -204,6 +207,9 @@ async function generateContext () {
     },
     DATE: def => {
       return generateRandomDate()
+    },
+    EMAIL: def => {
+      return generateName() + "@gmail.com"
     }
   }
   return {
@@ -397,7 +403,7 @@ async function generateSetOfDataElements () {
       return 'free text ' + shortid.generate()
     },
     DATE_novocab: rawValue => {
-      return generateRandomDate()
+      return generateRandomDate2018()
     }
   }
   const dataElementDefs = await getDataElementDefs()
@@ -607,6 +613,13 @@ function today () {
 function generateRandomDate () {
   const startDate = new Date(1950, 1, 1)
   const endDate = new Date(2017, 5, 5)
+  const r = dateGenerator.getRandomDateInRange(startDate, endDate)
+  return yyyymmdd(r)
+}
+
+function generateRandomDate2018 () {
+  const startDate = new Date(2018, 1, 1)
+  const endDate = new Date(2018, 09, 31)
   const r = dateGenerator.getRandomDateInRange(startDate, endDate)
   return yyyymmdd(r)
 }
