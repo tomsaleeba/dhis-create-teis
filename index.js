@@ -197,7 +197,7 @@ async function generateContext () {
       return Math.random() > 0.5
     },
     NUMBER: def => {
-      return Math.random() * 100
+      return Math.floor( Math.random() * 5 ) // Random int between 0 and 5
     },
     PHONE_NUMBER: def => {
       return '1234567890'
@@ -227,7 +227,7 @@ async function createStrategy (targetOrgUnits) {
     for (let i = 0; i < config.recordsToCreate; i++) {
       promises.push(async function wrapper () {
         // DHIS generator seems to be time based so we need to go easy on it
-        const waitMs = Math.floor(Math.random() * 50)
+        const waitMs = Math.floor(Math.random() * 100)
         await new Promise((resolve, reject) => {
           setTimeout(() => {
             return resolve()
