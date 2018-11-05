@@ -77,25 +77,54 @@ async function main () {
   }
 }
 main().catch(err => {
-  console.error(chalk.red('[ERROR] '), new VError(err))
+  let msg
+  if (err) {
+    if (err.config && err.config.data) {
+      msg += `; HTTP request body=${err.config.data}`
+    }
+    if (err.config && err.config.url) {
+      msg += `; HTTP request url=${err.config.url}`
+    }
+    if (err.config && err.config.headers) {
+      msg += `; HTTP request headers=${JSON.stringify(err.config.headers)}`
+    }
+    if (err.response && err.response.data) {
+      msg += `; HTTP response=${JSON.stringify(err.response.data)}`
+    }
+  }
+  console.error(chalk.red('[ERROR] ') + msg, err)
   process.exit(1)
 })
 
 
 async function populateTargetOrgUnits () {
+  let usersOrgUnits
   try {
-    const resp = await axios.get(`${apiUrl}/organisationUnits`, httpConfig({
+    const resp = await axios.get(`${apiUrl}/me`, httpConfig({
+      params: { fields: 'organisationUnits' }
+    }))
+    usersOrgUnits = resp.data.organisationUnits.map(e => e.id)
+  } catch (err) {
+    throw chainedError(err, 'failed to get current user orgUnits')
+  }
+  try {
+    const resp = await axios.get(`${apiUrl}/programs/${config.targetProgram}`, httpConfig({
       params: {
-        filter: 'level:eq:5',
-      },
-      paging: false,
+        fields: 'organisationUnits[id,level,path]'
+      }
     }))
     if (!resp.data.organisationUnits || resp.data.organisationUnits.length === 0) {
       throw new Error(`request to get orgUnits from server succeeded but there are no items in the response, data=${JSON.stringify(resp.data)}`)
     }
-    return resp.data.organisationUnits.map(e => e.id)
+    const allOrgUnitsInProgram = resp.data.organisationUnits
+    const justLevel4and5OrgUnits = allOrgUnitsInProgram.filter(e => {
+      const isWardOrEmpGroup = [4, 5].indexOf(e.level) >= 0
+      const isInSearchScope = usersOrgUnits.some(x => e.path.indexOf(x) >= 0)
+      return isWardOrEmpGroup && isInSearchScope
+    })
+    return justLevel4and5OrgUnits.map(e => e.id)
   } catch (err) {
-    throw chainedError(err, 'failed while trying to get all level 5 orgUnits (empowerment groups)')
+    throw chainedError(err, 'failed while trying to get all level 4 (wards) and 5 (empowerment groups) orgUnits')
   }
 }
 
@@ -434,13 +463,14 @@ function logAxiosError (err) {
 }
 
 async function deleteStrategy (targetOrgUnits) {
-  info('Gathering TEI IDs to delete')
+  info(`Gathering TEI IDs to delete, looking for fullNamePrefix='${config.fullNamePrefix}'`)
   let teisToDelete
   try {
     const orgUnitIdList = targetOrgUnits.join(';')
     const resp = await axios.get(`${apiUrl}/trackedEntityInstances`, httpConfig({
       params: {
         filter: `${config.fullNameAttributeId}:LIKE:${config.fullNamePrefix}`,
+        program: config.targetProgram,
         ou: orgUnitIdList,
         pageSize: config.pageSize
       }
@@ -456,7 +486,7 @@ async function deleteStrategy (targetOrgUnits) {
       info('Found a full page of TEIs to delete, you should run this again in case there are more records than our page size')
     }
   } catch (err) {
-    throw new VError(err, 'Failed to get list of TEIs to delete')
+    throw chainedError(err, 'Failed to get list of TEIs to delete')
   }
   const deletePromises = teisToDelete.map(curr => axios.delete(`${apiUrl}/trackedEntityInstances/${curr}`, httpConfig()))
   info('Starting delete operations')
