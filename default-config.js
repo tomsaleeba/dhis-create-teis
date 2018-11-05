@@ -4,7 +4,7 @@ module.exports = {
   recordsToCreate: 1,
   username: 'admin', // DHIS login username
   password: 'district', // DHIS login password
-  fullNamePrefix: 'test-', // prepended to the full name of all TEIs created (and used to target deletion)
+  fullNamePrefix: 'test-', // prepended to the full name of all TEIs created (and used to target deletion, but used with LIKE query so can appear anywhere)
   urlBase: 'http://localhost:8080', // URL of the DHIS instance
   apiPathPrefix: '/api/29', // specify the DHIS API version to pin to
   pageSize: 200,
