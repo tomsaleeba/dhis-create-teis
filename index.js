@@ -22,7 +22,7 @@ const config = Object.assign(defaultConfig, userConfig)
 const apiUrl = `${config.urlBase}${config.apiPathPrefix}`
 
 let runMode = 'create'
-if ('delete'.startsWith(process.argv[2])) {
+if ('delete'.startsWith(process.argv[3])) {
   runMode = 'delete'
 }
 
