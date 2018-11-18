@@ -238,7 +238,7 @@ async function generateContext () {
       return generateRandomDate()
     },
     EMAIL: def => {
-      return generateName() + "@gmail.com"
+      return generateEmail()
     }
   }
   return {
@@ -354,8 +354,8 @@ async function generateEventData (teiId, orgUnit, enrollmentId) {
   const eventDate = moment().subtract(config.startDataEntryMonthsBack, 'months')
   const events = []
   for (let i = 0; i < config.dataEntryMonthCount; i++) {
-    const dataValues = await generateSetOfDataElements()
     eventDate.add(1, 'months') // note: moment mutates in place
+    const dataValues = await generateSetOfDataElements(eventDate)
     const event = {
       trackedEntityInstance: teiId,
       program: config.targetProgram,
@@ -418,7 +418,7 @@ async function getDataElementDefs () {
   return result
 }
 
-async function generateSetOfDataElements () {
+async function generateSetOfDataElements (reportingPeriodDate) {
   const colTypeStrategies = {
     BOOLEAN_novocab: function (def) {
       return Math.random() > 0.5
@@ -432,7 +432,7 @@ async function generateSetOfDataElements () {
       return 'free text ' + shortid.generate()
     },
     DATE_novocab: rawValue => {
-      return generateRandomDate2018()
+      return reportingPeriodDate.format('YYYY-MM-DD')
     }
   }
   const dataElementDefs = await getDataElementDefs()
@@ -634,6 +634,14 @@ function generateName () {
   const firstNameValue = firstNames[firstNameIndex]
   const surnameValue = surnames[surnameIndex]
   return `${firstNameValue} ${surnameValue}`
+}
+
+function generateEmail () {
+  const firstNameIndex = Math.floor(Math.random() * firstNames.length)
+  const surnameIndex = Math.floor(Math.random() * surnames.length)
+  const firstNameValue = firstNames[firstNameIndex]
+  const surnameValue = surnames[surnameIndex]
+  return `${firstNameValue}.${surnameValue}@gmail.com`
 }
 
 function today () {
